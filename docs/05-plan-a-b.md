@@ -92,3 +92,34 @@ GET /{prefix}/yt/timedtext?v=<id>&lang=en&tlang=zh-Hans&fmt=json3
 1. **先验收 A**（机主配置 + 播放实测），拿到真实延迟体感；
 2. 若延迟/质量不满意 → 做 B 的 M1–M3（服务端，纯后端，可先离线验证）；
 3. B 的 M4 再决定是否投入（涉及 smali 补丁维护成本）。
+
+---
+
+## 2026-10-31 实测进展与阻塞
+
+**已完成**
+
+- MicroG-RE 7.2.2（`app.revanced.android.gms`）安装完成，Google 账号已登录，YouTube Morphe 可正常观看。
+- App 内 AI 配置完成并验证可达：
+  `http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions`（Key `local`，模型 `hy7b`），
+  「测试 API」在网关侧留下真实请求：`POST /a2bxj5/v1/plain/chat/completions 200`（12:49:55）。
+- 三个开关（启用 AI / 普通视频弹菜单 / Shorts 弹菜单）均为 ON。
+- 网关 `/v1/plain/models` 已补上（补丁获取模型列表不再 404）。
+
+**阻塞**
+
+- 播放时（CC → 自动翻译 → 中文(简体中文)），网关**没有**收到翻译请求；
+  「字幕诊断 → 展开」显示：`当前模式：原字幕（零翻译 API）`、`target=en;translate=false`。
+  看到的简体字幕来自 YouTube 自身机翻，不是本地模型。
+- 诊断确认引擎本体已加载（`引擎：事件重建 / 1.6.0`，有 REBUILD 记录，1 次 API 尝试=测试）。
+
+**推断**：`rewriteUrl`（timedtext 请求改写钩子）在 21.43.523 上没被触发/未命中，
+即作者标注的「experimental + phone acceptance pending」。设置层与引擎层都在，唯独请求层没接管。
+
+**下一步（按成本排序）**
+
+1. 播放中打开播放器弹出菜单（⋮）里的「AI 字幕」单视频开关，再重选一次「自动翻译→中文」；
+   看诊断的 `当前模式` 是否变为翻译态。
+2. 若仍为「原字幕」→ 用 `scripts/build-patched-apk.sh` 重建到 **21.30.216**（官方常规目标，
+   非实验版），大概率能命中钩子。
+3. 仍不行 → 给上游提 issue（附诊断导出），或转 B 路线（整轨道代理，不依赖该钩子）。
