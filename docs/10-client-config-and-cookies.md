@@ -154,3 +154,85 @@ curl 'http://192.168.2.97:8787/a2bxj5/yt/debug?limit=20'
 1. 优先升级到当前包 —— 手动 Cookie 一旦过期就会导致字幕轨取不到；
 2. 若必须留在旧包，Cookie 失效的表现是「字幕源失败 / 一直翻译中」，
    此时重新点一次「获取字幕 Cookie」即可（等价于请求一次 `https://www.youtube.com/sw.js`）。
+
+---
+
+## 5. 换域名 / 用反代之后「必须重填 API Key」，以及闪退
+
+### 现象
+
+把 API 地址从 `http://192.168.2.97:8787/...` 改成 `https://airoute.codet.net/...` 后：
+
+1. 测试时提示要输入 API Key；
+2. 随便输一个后 App 直接退出；
+3. 之后 AI 字幕用不了（一直要 key）。
+
+### 原因一：Key 与「源」绑定（设计如此）
+
+`SecureApiKey` 把 key 用 Android Keystore 加密保存，并**同时记下 `scheme://authority`**：
+
+```java
+private static String origin(Context context) {
+    URI uri = URI.create(DeepSeekConfig.baseUrl(context));
+    return uri.getScheme().toLowerCase(Locale.ROOT) + "://"
+         + uri.getRawAuthority().toLowerCase(Locale.ROOT);
+}
+private static boolean originMatches(Context context) { ... saved.equals(current) ... }
+```
+
+换域名 = origin 变了 → `load()` 直接返回空 → App 认为没有 key → 要求重填。
+这是防「改地址把 key 发给别的服务器」的保护，不是 bug。
+
+**所以：换地址后必须重填一次 Key，填什么都行**（网关不校验 `Authorization`）。
+建议填 `sk-local`（纯 ASCII、单行、别粘贴）。
+
+### 原因二：闪退来自「地址不合法」
+
+`origin()` 没有做空值/异常保护：`URI.create(baseUrl)` 之后直接 `getScheme().toLowerCase()`。
+如果保存的地址缺少 `https://`、含中文/空格/换行、或带 `#fragment`：
+
+- `URI.create` 抛 `IllegalArgumentException`，或
+- `getScheme()` / `getRawAuthority()` 返回 `null` → **NullPointerException**
+
+`save()` 的调用链没有捕获 → **App 崩溃退出**。
+而 `load()` 那边走的是 `ProviderEndpoint.validate`（失败会静默），所以崩溃后表现为「一直要 key」。
+
+### 正确操作顺序
+
+1. **先修地址**：AI 字幕翻译 → API 地址，清空后**手打**
+   `https://airoute.codet.net/a2bxj5/v1/plain/chat/completions`
+   确认：开头有 `https://`、结尾没有空格/换行、没有中文、没有 `#`。
+   停手后会自动保存（summary 写的是「停止输入后自动保存」）。
+2. **再填 key**：`sk-local`。
+3. 点「测试 API」确认。
+
+### 更稳的做法：用「API 配置方案」
+
+同一屏幕顶部有「API 配置方案」，每个方案独立保存 地址 / Key / 模型：
+
+```
+方案 A  lan    → http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions   key: sk-local
+方案 B  remote → https://airoute.codet.net/a2bxj5/v1/plain/chat/completions  key: sk-local
+```
+
+切换方案即可，两个 origin 各自保留自己的 key，不会再互相顶掉。
+
+### 反代侧要求（已实测通过）
+
+| 检查 | 结果 |
+|---|---|
+| `GET /a2bxj5/v1/plain/models` | 200，`application/json`，1.17s |
+| `POST .../chat/completions`（非流式 + `response_format`） | 200，0.45s，返回 `{block, events}` |
+| `POST .../chat/completions`（`stream:true`） | 200，1.16s，正常 SSE 分块 |
+| 带 `Authorization: Bearer sk-local` | 200（网关忽略该头） |
+
+反代**不要**加 Basic Auth（App 会拿到 401，表现成「配置无效」），也不要把路径重写掉。
+
+### 如果修好地址后仍然闪退
+
+那就是 Keystore 侧的问题（MicroG / 部分 ROM 上 `AndroidKeyStore` 生成密钥失败）。
+两种处理：
+
+1. 「清除本方案的 API Key」→ 再填一次；
+2. 需要彻底绕开的话，可以出一个补丁版 APK：去掉 key 的 origin 绑定 + 允许空 key + `origin()` 加空值保护
+   （源码在本地推导仓库，用 Morphe CLI 重新打包）。
