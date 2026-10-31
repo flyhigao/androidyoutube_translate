@@ -225,3 +225,23 @@ adb -s 192.168.2.223:5555 push TvAppDrawer.apk /data/local/tmp/ && adb shell 'pm
 ```
 
 实测：抽屉 → DPAD 选中 → OK，`YouTube (M)` 打开补丁版 YouTube，`MicroG RE` 打开账号设置。
+
+### 9.8 电视上的登录状态（重要）
+
+补丁版 YouTube 在电视上**没有登录任何账号**：首页/播放/字幕全部匿名可用，
+「我」页面显示的是「登录」按钮。MicroG 里也没有添加账号——
+所以"能直接打开" ≠ "已登录"。需要登录时：
+
+1. 用手机端的 **TiVoRemote 触控板**（或 USB 鼠标）点电视上的「登录」；
+2. 会拉起 MicroG 的 Google 登录 WebView，用遥控器/触控板聚焦输入框，
+   再用 TiVoRemote 的「⌨️ 打字」把邮箱/密码推到电视输入框；
+3. 有 2FA 时同样用推送文本输入验证码。
+
+### 9.9 手机当鼠标：TiVoRemote 触控板（已实现）
+
+`E:\esp\project\tivoremote` 新增 **🖱 触控板** 按钮（全屏 Dialog）：
+轻点=`input tap`、拖动=`input swipe`、长按=`input swipe x y x y 900`，
+坐标按 1920×1080 映射，16:9 居中避免拉伸。已编译安装到手机（v1.1）。
+
+验证：手机触控板点电视坐标 (215,900) → 电视抽屉里的 YouTube Morphe 被点开；
+点 (1703,1000) → 电视切到「我」页面。
