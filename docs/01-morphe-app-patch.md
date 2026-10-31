@@ -14,20 +14,39 @@
 
 ## 步骤
 
+### 推荐：PC 端 CLI 一键构建（本次实际采用）
+
+```bash
+bash scripts/build-patched-apk.sh c784f5f4
+```
+
+内部做的事：`adb pull` 已安装的官方 YouTube 四件套 → 打包 `.apks` → `morphe-desktop` CLI 合并并打补丁
+（官方默认 109 个补丁 + `AI caption translator`）→ 推送到手机 `pm install`。
+
+产物包名是 `app.morphe.android.youtube`（GmsCore support 补丁自动改包名），
+所以**与官方 YouTube、RVX 三者共存**，不需要卸载任何现有 App。
+
+### 备选：手机上用 Morphe Manager
+
 1. 装 [Morphe Manager](https://github.com/MorpheApp/morphe-manager/releases/latest)，设置 → 开「专家模式」。
 2. 补丁源 → 添加远程：`https://github.com/YYDarlinker/morphe-ai-caption-translator`。
-3. 选 YouTube → 输入源：
-   - 优先「从已安装应用获取」（Manager 会合并 split；补丁声明 `ApkFileType.APK_REQUIRED`，必须整包）；
-   - 或下载 21.43.523 的 `.apkm` 交给 Manager 自动转 APK。
-4. 补丁选择：**保留官方默认组合**（Captions / 设置 / GmsCore 支持等），
-   只额外确认勾选 `AI caption translator`（该源内 `default = true`）。
-5. 打补丁 → 安装（签名变化，系统会要求先卸载官方 YouTube）。
-6. YouTube → 设置 → Morphe → 视频 → **AI字幕翻译**：
+3. 选 YouTube → 输入源：「从已安装应用获取」（Manager 会合并 split；补丁声明 `ApkFileType.APK_REQUIRED`，必须整包）。
+4. 补丁选择：**保留官方默认组合**，只额外确认 `AI caption translator`。
+5. 打补丁 → 安装。
+
+### App 内配置
    - API 地址：`http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions`
    - 密钥：任意（网关不校验入站 key）
    - 模型：`hy7b`（网关会用 `DEFAULT_MODEL` 覆盖该字段）
    - 点「测试 API」
 7. 播放 → 开 CC → 字幕菜单 → 自动翻译 → 中文。
+
+## 已实测结果（2026-10-31）
+
+- 构建：26.7s，109 个补丁，产物 137MB，签名 `CN=Morphe`
+- 安装：`pm install -r -t` 成功，启动无 FATAL
+- 资源校验：`cap_ai_title`（"AI 字幕翻译"）、`DeepSeekEnabledPreference` 均已在包内
+- 网关侧：`json_schema` 请求 200 / 0.3~0.9s
 
 ## 踩坑与回退
 
@@ -35,5 +54,5 @@
   退回 `21.30.216`（常规目标，minSdk 29）。
 - 若「测试 API」报 `response_format ... not supported`：说明上游不支持 JSON Schema，
   补丁会自动降级（本次网关已把上游 4xx 错误体原样透传，正是为这个协商服务）。
-- 回退：卸载补丁版 YouTube，装回 Play 商店版；RVX 全程不受影响，数据不动。
+- 回退：卸载 `app.morphe.android.youtube` 即可；官方 YouTube 与 RVX 全程不受影响，数据不动。
 - `PATH_PREFIX` 必须带上（2.97 上是 `a2bxj5`），漏了会 404。
