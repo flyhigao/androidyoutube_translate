@@ -103,3 +103,10 @@ scripts/adb-reverse.sh          仅调试用：USB 隧道（生产走局域网�
   网关侧只配置 `YT_PROXY=socks5h://127.0.0.1:11070`。
 - 一键重建：`bash scripts/setup-yt-proxy.sh`
 - 细节见 `docs/08-whole-track.md` 末两节。
+
+## 仓库与相关文档
+
+- 本仓库：<https://github.com/flyhigao/androidyoutube_translate>
+- 网关本体：<https://github.com/flyhigao/immersive-context-booster>
+  - 字幕链路四种实现的对比与当前选择：`docs/subtitle-pipeline.md`
+- 客户端配置路径与 Cookie 生命周期：`docs/10-client-config-and-cookies.md`
