@@ -1,0 +1,131 @@
+# 部署运行手册（MicroG + Morphe + AI 字幕）
+
+> 一次性把「Android 设备上的 YouTube AI 字幕」部署完的完整流程。
+> 已在 OnePlus PJZ110（Android 17，官方 YouTube 21.43.523）上跑通到「配置可用、钩子未命中」阶段，见文末状态。
+
+## 0. 前置
+
+| 项 | 要求 |
+|---|---|
+| 电脑 | Git Bash + adb（`E:\Android\sdk\platform-tools\adb.exe`）+ JDK 21+（可用 Android Studio 自带 `jbr`） |
+| 补丁工具 | `morphe-desktop-<ver>-all.jar`（MorpheApp/morphe-desktop releases） |
+| 网关 | `http://192.168.2.97:8787/a2bxj5`（systemd: `immersive-translator`） |
+| 设备 | 开 USB 调试 / 网络调试，`adb devices` 可见 |
+
+```bash
+export MSYS_NO_PATHCONV=1                 # 避免 Git Bash 把 /data 转成 Windows 路径
+ADB="/e/Android/sdk/platform-tools/adb.exe -s <serial>"
+JAVA="/e/Program Files/Android/Android Studio/jbr/bin/java.exe"
+```
+
+## 1. 网关自检
+
+```bash
+curl -s http://192.168.2.97:8787/a2bxj5/v1/models
+curl -s http://192.168.2.97:8787/a2bxj5/v1/plain/models   # 手机端补丁用这个
+```
+
+两个都应返回 `hy7b` / `hy1.8b`。若 404：检查 `PATH_PREFIX`（2.97 上是 `a2bxj5`）。
+
+## 2. 安装 MicroG-RE
+
+补丁版 YouTube 只认 **MicroG-RE**（Morphe 分支），包名必须是 `app.revanced.android.gms`。
+旧版 ReVanced MicroG 会被判定「不适配」并提示卸载。
+
+```bash
+cd /e/tmp
+curl -L -o microg-re.apk \
+  https://github.com/MorpheApp/MicroG-RE/releases/download/7.2.2/microg-7.2.2-icon-arm64-v8a.apk
+"$ADB" push microg-re.apk /data/local/tmp/ && \
+"$ADB" shell 'pm install -r -t /data/local/tmp/microg-re.apk'
+"$ADB" shell 'dumpsys deviceidle whitelist +app.revanced.android.gms'   # 电池白名单
+```
+
+- 装完先打开一次 MicroG，让它完成自检（设备注册 / 云消息）。
+- **卸载 MicroG 会连带清空已登录的 Google 账号**，重装后要在 MicroG → 帐户 里重新登录。
+- armeabi-v7a / 无图标变体按设备 ABI 选择；TV 盒子同理。
+
+## 3. 构建补丁版 YouTube
+
+```bash
+# 3.1 拉取设备上已安装的官方 YouTube 分卷（base + split）
+mkdir -p /e/tmp/ytsplit && cd /e/tmp/ytsplit && rm -f *.apk
+for p in $("$ADB" shell pm path com.google.android.youtube | sed 's/package://' | tr -d '\r'); do
+    "$ADB" pull "$p" .
+done
+
+# 3.2 打包成 .apks（Morphe 会自动合并分卷）
+zip -q -0 /e/tmp/yt-bundle.apks ./*.apk
+
+# 3.3 打补丁（官方默认组合 + AI caption translator）
+"$JAVA" -jar /e/tmp/morphe-desktop.jar patch \
+  --patches=https://github.com/MorpheApp/morphe-patches \
+  --patches=https://github.com/YYDarlinker/morphe-ai-caption-translator \
+  --out /e/tmp/yt-patched.apk \
+  /e/tmp/yt-bundle.apks
+```
+
+一键脚本：`bash scripts/build-patched-apk.sh <serial>`（含安装）。
+
+产物特征（实测）：
+
+- 包名 `app.morphe.android.youtube`（GmsCore support 补丁自动改包名 → 与官方 YouTube / RVX 共存）
+- 标签 `YouTube Morphe`，启动 Activity `…morphe_black_1`
+- 109 个补丁，含 `AI caption translator` / `Captions` / `GmsCore support`（指向 `app.revanced.android.gms`）
+- 26.7s 出包，137MB，签名 `CN=Morphe`
+
+## 4. 安装
+
+```bash
+"$ADB" push /e/tmp/yt-patched.apk /data/local/tmp/
+"$ADB" shell 'pm install -r -t /data/local/tmp/yt-patched.apk'
+"$ADB" shell 'rm -f /data/local/tmp/yt-patched.apk'
+```
+
+## 5. App 内配置
+
+路径：**YouTube Morphe → 头像 → 设置 → Morphe → 视频 → AI 字幕翻译**
+
+| 字段 | 值 |
+|---|---|
+| 启用 AI 字幕翻译（开关） | ON |
+| 普通视频 / Shorts 弹出菜单开关 | ON（按需） |
+| API 地址 | `http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions` |
+| API Key | 任意非空（如 `local`；网关不校验，客户端要求非空） |
+| 模型 | `hy7b`（网关会用 `DEFAULT_MODEL` 覆盖） |
+
+点「测试 API」→ 成功时网关日志会出现：
+`POST /a2bxj5/v1/plain/chat/completions HTTP/1.1" 200`。
+
+> adb 代填（可选）：`input tap` + `input text`，注意先 `input keycombination 113 29` 全选再删，
+> 否则会追加到默认值后面（默认 `https://api.deepseek.com`）。
+
+## 6. 验收
+
+1. 播放视频 → 开 CC → **长按 CC** 打开字幕菜单 →「自动翻译」→「中文 (简体中文)」。
+2. 看网关是否收到成串请求：
+   ```bash
+   ssh root@192.168.2.97 'journalctl -u immersive-translator -n 50 --no-pager | grep plain/chat'
+   ```
+3. App 内「AI 字幕翻译 → 缓存与诊断 → 字幕诊断 → 展开」，关注：
+   - `当前模式：AI 翻译` （若是「原字幕（零翻译 API）」= 钩子未命中）
+   - `API：N 次尝试 · M 次成功`
+
+## 7. 排错
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 启动弹「MicroG 不适配」 | 装 MicroG-RE（见 §2），包名必须是 `app.revanced.android.gms` |
+| 测试 API 失败 + 网关 404 | URL 少了 `PATH_PREFIX` |
+| 模型列表 404 | 网关需提供 `/v1/plain/models`（本项目已加） |
+| 字幕是中文但没有 API 请求 | 看到的是 YouTube 自带机翻；钩子未命中（见 §8） |
+| 21.43.523 上钩子不命中 | 该版本是实验目标；回退 21.30.216（常规目标）重建 |
+
+## 8. 当前状态（2026-10-31）
+
+- MicroG-RE 7.2.2 安装 + 账号登录 ✅
+- 补丁包构建 / 安装 / 启动 ✅
+- API 配置保存 + 测试请求 200 ✅
+- **播放时翻译请求未触发**：诊断显示 `当前模式：原字幕（零翻译 API）`、`target=en; translate=false`
+  → timedtext 请求改写钩子在 21.43.523 上未命中（作者标注 experimental / phone acceptance pending）。
+- 后续：重建 21.30.216，或转 B 路线（整轨道代理）。
