@@ -236,3 +236,49 @@ private static boolean originMatches(Context context) { ... saved.equals(current
 1. 「清除本方案的 API Key」→ 再填一次；
 2. 需要彻底绕开的话，可以出一个补丁版 APK：去掉 key 的 origin 绑定 + 允许空 key + `origin()` 加空值保护
    （源码在本地推导仓库，用 Morphe CLI 重新打包）。
+
+---
+
+## 6. 两套配置方案（反代 + 内网）
+
+「API 配置方案」每个方案**独立保存 地址 / Key / 模型**，切换即生效，互不影响。
+
+| 方案名 | API 地址 | Key | 模型 |
+|---|---|---|---|
+| `remote`（默认） | `https://airoute.codet.net/a2bxj5/v1/plain/chat/completions` | `sk-local` | `hy7b` |
+| `lan` | `http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions` | `sk-local` | `hy7b` |
+
+步骤：
+
+1. `AI 字幕翻译` → **API 配置方案** → 新建，命名 `remote`
+2. 填地址（必须 `https://` 开头、无空格换行）→ Key `sk-local` → 模型 `hy7b`
+3. 再新建一个 `lan`，填内网地址 + 同样的 Key/模型
+4. 点方案名切换；**当前选中的方案就是生效的方案**（App 会记住）
+
+> Key 填 `sk-local` 就行：网关不校验 `Authorization`。
+> 每个方案的 Key 单独加密保存并绑定自己的 `scheme://authority`，所以两套之间来回切**不用重填**。
+> 如果**改同一个方案的地址**，该方案的 Key 会失效并要求重填——这正是要建两个方案的原因。
+
+## 7. 中文视频不要再翻译一遍
+
+App 端无法判断"这片是中文所以别处理"（它只看 YouTube 的轨道语言与你在 CC 里选的目标语言）。
+所以这个判断放在**网关**做（`gateway/shim.py`）：
+
+```python
+# 源文本 CJK 占比 >= 50% 且目标语言是 zh-* → 直接按句返回原文，0 模型调用
+if _already_target(text, tgt): ...
+```
+
+实测：
+
+```
+中文源  107ms  直接返回原文（不调模型）
+英文源  518ms  正常翻译
+```
+
+开关：`SHIM_SKIP_SAME_LANGUAGE=1`（默认开）。
+
+**关于"默认不打开 CC"**：补丁里**没有任何强制开启字幕的代码**（已核对
+`application-host` / `translation-core` / `extensions`），CC 的开关完全是 YouTube 自己的记忆状态。
+AI 字幕只在「CC 打开 + 字幕语言选的是自动翻译」时才介入。
+所以中文视频不想看字幕 → 直接关 CC 即可；想看原文但不想翻译 → 现在的网关也会直接透传原文。
