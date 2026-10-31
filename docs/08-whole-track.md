@@ -190,8 +190,8 @@ OpenWrt（`192.168.2.1`）PassWall 的真实入口：
 | SOCKS5 入口 | `127.0.0.1:1070`（`socks-in`，noauth，**仅路由器本机监听**） |
 | tproxy 入口 | `:1041`（`tcp_redir` / `udp_redir`，给局域网透明代理用） |
 | DNS 入口 | `127.0.0.1:15353`（`dns-in`） |
-| 节点 1 | `LA-xhttp`（`rPiflUD8`，`la.codet.net:443`，vless+reality+xhttp，path `/xhtp`），出口 `64.186.237.81` |
-| 节点 2 | `HK-xhttp-ng`（`0ELiXGVq`，`hk.codet.net:443`，path `/xhtp1`），出口 `47.83.152.45` |
+| 节点 1 | `LA-xhttp`（`rPiflUD8`，`<LA 节点主机>:443`，vless+reality+xhttp，path `/xhtp`），出口 `<LA 出口 IP>` |
+| 节点 2 | `HK-xhttp-ng`（`0ELiXGVq`，`<HK 节点主机>:443`，path `/xhtp1`），出口 `<HK 出口 IP>` |
 | 分流总节点 | `myshunt`，`default_node=LA-xhttp`（原始设置，已恢复） |
 
 `1070` 只监听 `127.0.0.1`，所以 2.97 不能直连，用 SSH 隧道把它拉过来：
@@ -213,7 +213,7 @@ YT_PROXY=socks5h://127.0.0.1:11070
 ```
 
 > 注意：`socks5h` 的 `h` 让 DNS 也在路由器侧解析，否则 YouTube 域名会被 2.97 本地解析后按 IP 直连，代理等于没用。
-> 实测两个节点出口 IP 不同（LA `64.186.237.81` / HK `47.83.152.45`），HK 节点更容易触发
+> 实测两个节点出口 IP 不同（LA 与 HK 出口 IP 不同），HK 节点更容易触发
 > `Sign in to confirm you're not a bot`，所以**保持 `default_node=LA-xhttp`**，不要为抓字幕改全局默认节点。
 
 ## 实测结果（修复后）
