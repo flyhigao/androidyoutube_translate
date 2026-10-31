@@ -123,3 +123,18 @@ GET /{prefix}/yt/timedtext?v=<id>&lang=en&tlang=zh-Hans&fmt=json3
 2. 若仍为「原字幕」→ 用 `scripts/build-patched-apk.sh` 重建到 **21.30.216**（官方常规目标，
    非实验版），大概率能命中钩子。
 3. 仍不行 → 给上游提 issue（附诊断导出），或转 B 路线（整轨道代理，不依赖该钩子）。
+
+### 2026-10-31 14:28 A 路线验收通过（此前结论作废）
+
+之前"钩子未命中"是**测错视频**：3Blue1Brown 那条视频自带 `zh / zh-CN / zh-TW` 原生字幕轨，
+补丁按设计直接显示原生中文、不调 API。换成**只有 `en` 轨**的视频后：
+
+```
+视频: https://www.youtube.com/watch?v=qudm6mShR2U （仅 en 轨，已用 ytInitialPlayerResponse 核实）
+操作: CC → 长按 CC → 自动翻译 → 中文 (简体中文)
+网关: 90 秒内 9 次 POST /a2bxj5/v1/plain/chat/completions 200（来自 192.168.2.204）
+画面: 先显示「翻译中…」，随后显示本地模型译文，例如「一有机会就从这儿离开。」
+```
+
+结论：**逐句 AI 字幕在手机端已闭环可用**。选片原则：先用 player response 确认目标语言没有原生轨。
+
