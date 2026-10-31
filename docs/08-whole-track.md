@@ -85,3 +85,46 @@ adb dumpsys media_session  →  标题
 实测补丁的单块请求：输入 1.6–2.6KB（约 500–800 token）+ 输出 200–400 token ≈ **1100–1200 token**，
 3k 够用但余量不大。若看到 `context shift`/截断或想加大 `context_before/after`，建议
 `--ctx-size 16384`（4096/slot），显存允许的话更稳。
+
+---
+
+## 性能优化（2026-10-31 16:30）
+
+20 分钟视频（134 条字幕、268 events）实测：
+
+| 版本 | 冷启动耗时 |
+|---|---|
+| 优化前（700 字/批，串行，不过滤重复） | **60–180s** |
+| 优化后（去重 + 1400 字/批 + 3 批并发） | **15.9s** |
+
+三个改动：
+1. **去重**：自动字幕是滚动生成，同一句会重复多次（本例 268 events → 134 条唯一文本）；
+2. **加大批量**：`YT_BATCH_CHARS=1400`（原 700），请求数从 ~20 降到 4；
+3. **批间并发**：`YT_CONCURRENCY=3`，配合 llama-server `--parallel 4`，留 1 个 slot 给实时字幕。
+
+覆盖率校验：134 条文本 → 120 条中文 + 14 条纯数字（正确保留），无漏译。
+
+## 预热服务已迁到 2.97
+
+```
+/opt/immersive-translator-gateway/scripts/watch_and_warm.py
+systemd: yt-warm-phone.service  (192.168.2.204:5555)
+         yt-warm-tv.service     (192.168.2.223:5555)
+```
+
+- 2.97 已装 `android-tools-adb`，并把笔记本的 `adbkey` 复制过去（免二次授权）；
+- 手机已 `adb tcpip 5555`，2.97 可直接 `adb connect`；
+- 服务开机自启，日志：`journalctl -u yt-warm-phone -f`。
+
+**注意**：手机重启后 adbd 会退回 USB 模式，需要再执行一次 `adb tcpip 5555`
+（电视是网络 adb，不受影响）。
+
+## 给 llama-server 的建议（再快一档）
+
+你现在：`--ctx-size 12288 --parallel 4 --cache-ram 0`
+
+- `--cache-ram 0` **关闭了 prompt 缓存**，每次请求都要重新 prefill 整段提示词；
+  改成 `--cache-ram 2048` 能让固定 system prompt / 重复块命中缓存，实时字幕的
+  短块尤其是重复句会明显变快。
+- `3072 token/slot` 对当前请求（约 1100–1200 token）够用；若想加大 `context_before/after`
+  或整页合并，建议 `--ctx-size 16384`（4096/slot），配合 `--flash-attn` + q8_0 KV 显存代价很小。
