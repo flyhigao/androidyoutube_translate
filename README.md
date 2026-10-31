@@ -95,3 +95,11 @@ scripts/adb-reverse.sh          仅调试用：USB 隧道（生产走局域网�
 - [ ] 术语以 JSON-safe 方式注入（不破坏 schema）
 - [ ] B：`/yt/timedtext` 整轨道翻译 + 缓存
 - [ ] 网关入站鉴权（当前无鉴权，局域网内任何人可用你的显卡）
+
+## 字幕 429 / 代理（2026-10 结论）
+
+- 429 来自 **自动翻译轨 `en`**，不是 IP 整体被封；改抓原始轨 **`en-orig`** 即可。
+- 2.97 通过 SSH 隧道使用路由器 PassWall 的 SOCKS：`127.0.0.1:11070 → 192.168.2.1:1070`，
+  网关侧只配置 `YT_PROXY=socks5h://127.0.0.1:11070`。
+- 一键重建：`bash scripts/setup-yt-proxy.sh`
+- 细节见 `docs/08-whole-track.md` 末两节。
