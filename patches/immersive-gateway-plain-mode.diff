@@ -1,0 +1,161 @@
+diff --git a/gateway/server.py b/gateway/server.py
+index 51b67b8..5e53c8d 100644
+--- a/gateway/server.py
++++ b/gateway/server.py
+@@ -32,6 +32,28 @@ from gateway.analyzer import analyze_web_or_video, extract_terms_from_translatio
+ 
+ app = FastAPI(title="Immersive Context & Term Booster Gateway")
+ 
++
++class UpstreamHTTPError(Exception):
++    """上游返回 4xx/5xx：保留原始状态码与响应体，供客户端做能力协商（如不支持 response_format 时降级）。"""
++
++    def __init__(self, status_code: int, body: str):
++        self.status_code = status_code
++        self.body = body or ""
++        super().__init__(f"upstream HTTP {status_code}: {self.body[:300]}")
++
++    def payload(self) -> Any:
++        try:
++            return json.loads(self.body)
++        except Exception:
++            return {
++                "error": {
++                    "message": self.body[:2000],
++                    "type": "upstream_error",
++                    "code": self.status_code,
++                }
++            }
++
++
+ def clean_marker_protocol_response(input_text: str, raw_text: str) -> str:
+     """
+     根据请求原文中实际声明的 [[p\\d+]]，严格清洗对齐大模型输出:
+@@ -187,6 +209,7 @@ async def get_models():
+     }
+ 
+ @router.post("/v1/chat/completions")
++@router.post("/v1/plain/chat/completions")
+ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+     """
+     核心代理入口：
+@@ -199,6 +222,15 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+     body = await request.json()
+     messages = body.get("messages", [])
+     stream = body.get("stream", False)
++
++    # 0. 原生协议模式（手机端 AI 字幕补丁等自带 JSON Schema 的客户端）：
++    #    这类客户端在自己的 System Prompt 里已写死输出协议，任何额外注入
++    #    （语境 / 术语 / “只输出译文”）都会破坏其 JSON 解析，因此整段跳过注入与缓存。
++    #    进入方式：请求带 response_format，或直接把 API URL 指到 /v1/plain/chat/completions。
++    is_plain_mode = (
++        request.url.path.rstrip("/").endswith("/v1/plain/chat/completions")
++        or bool(body.get("response_format"))
++    )
+     
+     # 提取待翻译文本内容
+     user_content = ""
+@@ -218,7 +250,7 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+ 
+     # 2. 检查本地高频缓存 (Cache)
+     cache_key = ""
+-    if settings.ENABLE_CACHE and user_content_clean:
++    if settings.ENABLE_CACHE and user_content_clean and not is_plain_mode:
+         ctx_topic = active_ctx.get("topic", "") if active_ctx else ""
+         cache_raw = f"{settings.DEFAULT_MODEL}:{ctx_topic}:{user_content_clean}"
+         cache_key = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
+@@ -265,8 +297,8 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+                     }]
+                 })
+ 
+-    # 3. 术语库智能屈折变化模糊匹配
+-    matched_terms = find_matching_terms(user_content)
++    # 3. 术语库智能屈折变化模糊匹配（原生协议模式跳过）
++    matched_terms = [] if is_plain_mode else find_matching_terms(user_content)
+     
+     keep_original_terms = [t for t in matched_terms if is_keep_original_term(t["source"], t["target"])]
+     translate_terms = [t for t in matched_terms if not is_keep_original_term(t["source"], t["target"])]
+@@ -290,7 +322,7 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+     injection_parts = []
+     
+     # 英文人名与球员姓名强制保留英文原文铁律
+-    if settings.KEEP_NAMES_UNTRANSLATED:
++    if settings.KEEP_NAMES_UNTRANSLATED and not is_plain_mode:
+         injection_parts.append(
+             "【重要翻译规则 - 英文人名强制保留英文原文】：\n"
+             "在翻译中，所有出现的西方人名、球星名字、球员简称（例如 Al Horford, Steph, Curry, Klay, LeBron, Luka, Yaxel 等），在中文译文中必须统一 100% 原样保留英文，严禁音译为中文汉字（例如：Al Horford 绝不能翻译为“霍福德”或“阿尔·霍福德”，必须直接写作 Al Horford；Steph 绝不能翻译为“斯蒂芬”，必须直接写作 Steph；Yaxel 必须直接写作 Yaxel；Curry 必须直接写作 Curry）。严禁将任何人名翻译为中文。"
+@@ -300,7 +332,7 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+         injection_parts.append(
+             "【专有代号保护规则】：文本中出现的形如 __P_0__, __P_1__ 为受保护的专有代号，在中文译文中必须原样保留该代号不变。"
+         )
+-    if active_ctx and active_ctx.get("topic"):
++    if active_ctx and active_ctx.get("topic") and not is_plain_mode:
+         topic_clean = active_ctx.get("topic", "").strip()
+         is_context_relevant = True
+         domain_str = active_ctx.get("domain", "")
+@@ -365,8 +397,14 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+                 headers=headers,
+                 json=payload
+             )
+-            resp.raise_for_status()
++            if resp.status_code >= 400:
++                # 上游 4xx/5xx 原样上抛：手机端补丁（AI caption translator 等）
++                # 依赖错误文本判断“response_format 不支持”并自动降级，
++                # 不能只包成 502，否则协议协商会失败。
++                raise UpstreamHTTPError(resp.status_code, resp.text)
+             return resp.json()
++        except UpstreamHTTPError:
++            raise
+         except Exception as e:
+             if settings.BACKUP_BASE_URL and settings.BACKUP_API_KEY:
+                 print(f"[Gateway] 上游模型异常，自动切换到备用模型通道: {e}")
+@@ -517,6 +555,9 @@ async def chat_completions(request: Request, background_tasks: BackgroundTasks):
+                             active_ctx.get("domain", "") if active_ctx else ""
+                         )
+                 return JSONResponse(data)
++            except UpstreamHTTPError as e:
++                await client.aclose()
++                return JSONResponse(status_code=e.status_code, content=e.payload())
+             except Exception as e:
+                 await client.aclose()
+                 raise HTTPException(status_code=502, detail=f"上游模型请求失败: {str(e)}")
+diff --git a/run.sh b/run.sh
+index 05fba4b..b610be4 100755
+--- a/run.sh
++++ b/run.sh
+@@ -4,13 +4,31 @@ set -e
+ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ cd "$DIR"
+ 
++# Windows(Git Bash) 的 venv 在 Scripts/，Linux/macOS 在 bin/
++if [ -x ".venv/Scripts/python.exe" ]; then
++    VENV_PY=".venv/Scripts/python.exe"
++else
++    VENV_PY=".venv/bin/python3"
++fi
++
+ # 检查虚拟环境
+ if [ ! -d ".venv" ]; then
+     echo "📦 正在初始化 Python 虚拟环境..."
+-    python3 -m venv .venv
+-    .venv/bin/pip install --upgrade pip
+-    .venv/bin/pip install -r requirements.txt
++    BASE_PY="$(command -v python3 || command -v python)"
++    "$BASE_PY" -m venv .venv
++    if [ -x ".venv/Scripts/python.exe" ]; then
++        VENV_PY=".venv/Scripts/python.exe"
++        "$VENV_PY" -m pip install --upgrade pip
++        "$VENV_PY" -m pip install -r requirements.txt
++    else
++        VENV_PY=".venv/bin/python3"
++        "$VENV_PY" -m pip install --upgrade pip
++        "$VENV_PY" -m pip install -r requirements.txt
++    fi
+ fi
+ 
++# 避免 Windows GBK 控制台在打印 emoji 时崩溃
++export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
++
+ echo "🚀 正在启动 沉浸式翻译 · 智能语境与术语网关..."
+-exec .venv/bin/python3 -m uvicorn gateway.server:app --host 127.0.0.1 --port 8787 --reload
++exec "$VENV_PY" -m uvicorn gateway.server:app --host 127.0.0.1 --port 8787 --reload
