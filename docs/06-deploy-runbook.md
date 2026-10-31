@@ -129,3 +129,86 @@ zip -q -0 /e/tmp/yt-bundle.apks ./*.apk
 - **播放时翻译请求未触发**：诊断显示 `当前模式：原字幕（零翻译 API）`、`target=en; translate=false`
   → timedtext 请求改写钩子在 21.43.523 上未命中（作者标注 experimental / phone acceptance pending）。
 - 后续：重建 21.30.216，或转 B 路线（整轨道代理）。
+
+---
+
+## 9. Android TV（TiVo Stream 4K，SEI400TV）部署记录
+
+设备：Android 12 / SDK 31 / **armeabi-v7a（32 位）** / 4.1G 数据分区（可用约 1.0G）/ 自带 Google TV GMS。
+电视上的 YouTube 是 **`com.google.android.youtube.tv` 5.30.340**，而 AI 字幕补丁只支持
+**手机版 `com.google.android.youtube`**（`list-patches -f com.google.android.youtube.tv` 里没有该补丁）。
+所以做法是：**不改电视原版 YouTube，另外侧载一个补丁版手机 YouTube**。
+
+### 9.1 取 32 位手机版 APK
+
+Aptoide 的公开 API 可以直接下整包（含全部 ABI）：
+
+```bash
+curl -s "https://ws75.aptoide.com/api/7/app/get/package_name=com.google.android.youtube"   # 取 file.path
+curl -L -o yt-21.42.243.apk "https://pool.apk.aptoide.com/..."
+```
+
+本次拿到的是 **21.42.243**（`native-code: arm64-v8a, armeabi-v7a, x86, x86_64`）。
+它不在补丁声明列表（声明的是 21.42.241），因此打补丁时加 `--force`，App 会弹「实验性提示」。
+
+### 9.2 构建（只保留 v7a 以省空间）
+
+```bash
+JAVA="/e/Program Files/Android/Android Studio/jbr/bin/java.exe"
+"$JAVA" -jar morphe-desktop.jar patch \
+  --patches=https://github.com/MorpheApp/morphe-patches \
+  --patches=https://github.com/YYDarlinker/morphe-ai-caption-translator \
+  --force --striplibs armeabi-v7a \
+  --out yt-tv-patched.apk yt-21.42.243.apk
+```
+
+结果：109 个补丁（含 AI caption translator），25.8s，113MB。
+
+### 9.3 安装
+
+```bash
+ADB="adb -s 192.168.2.223:5555"
+curl -L -o microg-re-v7a.apk https://github.com/MorpheApp/MicroG-RE/releases/download/7.2.2/microg-7.2.2-icon-armeabi-v7a.apk
+$ADB push microg-re-v7a.apk /data/local/tmp/ && $ADB shell 'pm install -r -t /data/local/tmp/microg-re-v7a.apk'
+$ADB push yt-tv-patched.apk /data/local/tmp/ && $ADB shell 'pm install -r -t /data/local/tmp/yt-tv-patched.apk'
+$ADB shell 'dumpsys deviceidle whitelist +app.revanced.android.gms'
+```
+
+安装后首次启动会依次弹：**实验性提示**（选「我想要实验」）→ **MicroG 电池优化提示**（点「继续」；
+若循环弹，用上面的 deviceidle 白名单命令直接放行）→ 进入首页。
+
+### 9.4 TV 上的配置
+
+分辨率 1920×1080（`wm size` 覆盖）。按钮全部可用 `input tap` 点击（触屏事件在 TV 上也生效）：
+
+```
+我 → 设置(右上齿轮 1872,48) → 设置(Morphe) → 视频 → AI 字幕翻译
+```
+
+| 字段 | 值 |
+|---|---|
+| 启用 AI 字幕翻译 | ON |
+| API 地址 | `http://192.168.2.97:8787/a2bxj5/v1/plain/chat/completions` |
+| API Key | `local` |
+| 模型 | 点「刷新」后下拉选 `hy7b`（列表实测返回 2 个模型） |
+
+> TV 上 `input keycombination 113 29`（Ctrl+A）无效，清空输入框要：
+> `input keyevent 123`（移到末尾）+ 循环 `input keyevent 67`（DEL）。
+
+### 9.5 已验证 / 待验证
+
+- ✅ 两个包安装成功：`app.revanced.android.gms`、`app.morphe.android.youtube`
+- ✅ 启动正常，首页 / 播放 / 英文字幕渲染正常
+- ✅ 配置保存 + 「测试 API」成功：网关日志 `192.168.2.223 → POST /a2bxj5/v1/plain/chat/completions 200`
+- ⏳ 未完成：在「仅英文轨」的视频上选「自动翻译 → 中文(简体)」并确认网关出现成串请求。
+  电视上跑的是**手机版 UI**，遥控器/触屏注入操作字幕菜单很别扭，建议接一个 USB 鼠标设置。
+  注意：带原生中文字幕的视频（如 3Blue1Brown）**本来就不会调用 API**，会直接显示原生中文轨。
+
+### 9.6 回退
+
+```bash
+$ADB shell 'pm uninstall app.morphe.android.youtube'
+$ADB shell 'pm uninstall app.revanced.android.gms'   # 如果不再需要
+```
+
+电视自带 `com.google.android.youtube.tv` 全程未改动。
