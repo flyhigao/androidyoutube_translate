@@ -212,3 +212,16 @@ $ADB shell 'pm uninstall app.revanced.android.gms'   # 如果不再需要
 ```
 
 电视自带 `com.google.android.youtube.tv` 全程未改动。
+
+### 9.7 电视上启动这两个 App
+
+TV Launcher 只显示 `LEANBACK_LAUNCHER` 应用，手机版 YouTube 与 MicroG 都只有普通
+`LAUNCHER`，桌面上看不到。用应用抽屉（`com.tivo.drawer`，源码 `E:\esp\project	vdrawer`）进入；
+抽屉此前"点了没反应"，已修复（详见 `docs/07-tv-alternatives.md` §4）并重新安装：
+
+```bash
+cd /e/esp/project/tvdrawer && bash build.sh
+adb -s 192.168.2.223:5555 push TvAppDrawer.apk /data/local/tmp/ && adb shell 'pm install -r -t /data/local/tmp/TvAppDrawer.apk'
+```
+
+实测：抽屉 → DPAD 选中 → OK，`YouTube (M)` 打开补丁版 YouTube，`MicroG RE` 打开账号设置。
