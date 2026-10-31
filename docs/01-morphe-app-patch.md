@@ -56,3 +56,26 @@ bash scripts/build-patched-apk.sh c784f5f4
   补丁会自动降级（本次网关已把上游 4xx 错误体原样透传，正是为这个协商服务）。
 - 回退：卸载 `app.morphe.android.youtube` 即可；官方 YouTube 与 RVX 全程不受影响，数据不动。
 - `PATH_PREFIX` 必须带上（2.97 上是 `a2bxj5`），漏了会 404。
+
+## MicroG 适配（2026-10-31 实测）
+
+Morphe 补丁版 YouTube 要求 **MicroG-RE**（Morphe 自维护的 GmsCore 分支），
+包名必须是 `app.revanced.android.gms`。旧版 ReVanced MicroG 会被判定「不适配」。
+
+安装：
+
+```bash
+# 稳定版 7.2.2，arm64（本项目手机为 arm64-v8a）
+curl -L -o microg-re.apk \
+  https://github.com/MorpheApp/MicroG-RE/releases/download/7.2.2/microg-7.2.2-icon-arm64-v8a.apk
+adb push microg-re.apk /data/local/tmp/ && adb shell 'pm install -r -t /data/local/tmp/microg-re.apk'
+adb shell 'dumpsys deviceidle whitelist +app.revanced.android.gms'   # 电池白名单
+```
+
+实测：`package=app.revanced.android.gms`、`versionName=7.2.2`，安装后不再弹不适配提示。
+
+注意：
+
+- **删除 MicroG 会连带清空已登录的 Google 账号**，需在 MicroG → 账户 里重新添加。
+- RVX（`app.rvx.android.youtube`）用的是同一个 MicroG 包名，装 MicroG-RE 后一并恢复。
+- 装完先打开一次 MicroG 让它完成自检（设备注册 / 云消息），再开 YouTube。
