@@ -1,5 +1,10 @@
 # Android YouTube 中文字幕：自建 LLM 翻译方案
 
+> **2026-11-01 已完成迁移**：翻译网关在 `172.20.16.249:/opt/immersive-translator-gateway`
+> （systemd `immersive-translator`，端口 8787），上游 `http://172.20.16.90:8012/v1`。
+> 公网 `airoute.codet.net` 的 FRP 已切到 249；2.97 旧网关已停止并禁用，保留作回退。
+> 迁移与验收记录见 `docs/12-migrate-gateway-to-249.md`。
+
 把「YouTube App 自带的机翻字幕（慢、质量一般）」替换成「本机/局域网 7B 模型的 AI 翻译」，
 不需要 root，RVX 与官方 YouTube 可共存。
 
@@ -7,9 +12,9 @@
 
 | 环节 | 位置 | 状态 |
 |---|---|---|
-| 翻译网关 | `192.168.2.97:/opt/immersive-translator-gateway`（systemd: `immersive-translator`） | 已部署 plain 直通模式 |
-| 上游模型 | `http://172.20.16.90:8012/v1`（GPUStack，模型 `hy7b`） | 可用 |
-| 手机端 | OnePlus PJZ110 / Android 17，Morphe 补丁 `AI caption translator` | 已安装 `app.morphe.android.youtube` 21.43.523（与官方 YouTube / RVX 三者共存），待填 API 配置 |
+| 翻译网关 | `172.20.16.249:/opt/immersive-translator-gateway`（systemd: `immersive-translator`）<br>`192.168.2.97` 旧机已停止/禁用，保留回退 | 249 已部署并验证；公网反代已切到 249 |
+| 上游模型 | `http://172.20.16.90:8012/v1`（GPUStack/llama.cpp，`hy7b` 是 `hy1.8b` 的别名，7.5B） | 可用；249 到上游约 1ms |
+| 手机端 | OnePlus PJZ110 / Android 17，Morphe 补丁 `AI caption translator` | 已安装 `app.morphe.android.youtube` 21.43.523；API 地址为 249，WiFi/5G 双线路已实测 |
 | 原桌面链路 | Firefox + 沉浸式翻译 + 油猴脚本 | 未改动，继续可用 |
 
 网关对外地址（带 `PATH_PREFIX`）：
@@ -81,7 +86,14 @@ docs/02-gateway-plain-mode.md   网关改动的设计、代码位置、验证方
 docs/03-deploy-297.md           2.97 部署与回滚
 docs/04-openwrt-redirect.md     路由层重定向 YouTube 字幕请求的可行性分析（结论：TLS 拦截走不通）
 docs/05-plan-a-b.md             A（逐句，已实现）/ B（整轨道，待实现）的计划与验收
+docs/11-endpoint-failover-and-404.md 404 反复出现根因 + 内网/公网自动切换补丁
+docs/12-migrate-gateway-to-249.md 翻译平台迁移到 172.20.16.249 的部署与切换
+docs/13-api-access.md          接口地址、认证、端点、curl 与 App 配置速查
+docs/14-resource-audit.md      循环/CPU/内存/磁盘资源审计与优化建议
+docs/15-direct-hy7b-evaluation.md 直连 HY7B 公网的可行性与延迟/有效性评估
+docs/16-morphe-patch-model.md   Morphe 补丁模式：APK 二进制补丁，不是编译 YouTube
 patches/                        对 immersive-context-booster 的补丁（server.py / run.sh）
+patches/endpoint-failover/      AI 字幕 App 的线路自动切换补丁（diff / mpp / 测试）
 scripts/build-patched-apk.sh    一键：拉分卷 → 合并 → 打补丁 → 安装
 scripts/verify-plain.sh         4 项断言验证网关直通模式
 scripts/adb-reverse.sh          仅调试用：USB 隧道（生产走局域网，不需要）

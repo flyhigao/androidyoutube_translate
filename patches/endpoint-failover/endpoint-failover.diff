@@ -1,0 +1,724 @@
+diff --git a/application-host/src/main/java/app/yydarlinker/deepseekcaptions/CaptionApplication.java b/application-host/src/main/java/app/yydarlinker/deepseekcaptions/CaptionApplication.java
+index 6f1616a..5ed2200 100644
+--- a/application-host/src/main/java/app/yydarlinker/deepseekcaptions/CaptionApplication.java
++++ b/application-host/src/main/java/app/yydarlinker/deepseekcaptions/CaptionApplication.java
+@@ -151,16 +151,23 @@ final class CaptionApplication extends TranslationRuntime.Host
+ 
+     @Override
+     TranslationSettings settings(Context c) {
++        boolean onWifi = DeepSeekConfig.onWifi(c);
+         synchronized (ApiProfiles.LOCK) {
+             DeepSeekConfig.RequestSettings read = DeepSeekConfig.requestSettings(c);
+             DeepSeekConfig.ProviderSettings p = read.provider;
++            DeepSeekConfig.RequestSettings fallback = DeepSeekConfig.fallbackRequest(c);
++            DeepSeekConfig.ProviderSettings f = fallback == null ? null : fallback.provider;
+             return new TranslationSettings(
+                     p.enabled,
+                     p.baseUrl,
+                     p.model,
+                     p.prompt,
+                     read.apiKey,
+-                    p.preferenceProvenance);
++                    p.preferenceProvenance,
++                    f == null ? "" : f.baseUrl,
++                    fallback == null ? read.apiKey : fallback.apiKey,
++                    f == null ? p.model : f.model,
++                    onWifi);
+         }
+     }
+ 
+diff --git a/application-host/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekCaptionHook.java b/application-host/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekCaptionHook.java
+index c55cde1..193b4be 100644
+--- a/application-host/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekCaptionHook.java
++++ b/application-host/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekCaptionHook.java
+@@ -45,6 +45,7 @@ public final class DeepSeekCaptionHook {
+             // Clear the previous video's CC permission before any activation can run.
+             CaptionButtonController.onVideoId(videoId);
+             TokenCostAudit.onVideoId(context(), videoId);
++            WarmPing.ping(context(), videoId);
+             NativeCaptionBridge.onVideoId(videoId);
+             CaptionActions.onVideoId(videoId);
+         } catch (Throwable ignored) {
+diff --git a/caption-shared/src/main/java/app/yydarlinker/deepseekcaptions/TranslationSettings.java b/caption-shared/src/main/java/app/yydarlinker/deepseekcaptions/TranslationSettings.java
+index 45347e6..8e7189e 100644
+--- a/caption-shared/src/main/java/app/yydarlinker/deepseekcaptions/TranslationSettings.java
++++ b/caption-shared/src/main/java/app/yydarlinker/deepseekcaptions/TranslationSettings.java
+@@ -5,6 +5,16 @@ final class TranslationSettings {
+     final boolean enabled;
+     final String baseUrl, model, prompt, apiKey, preferenceProvenance, effectivePreference;
+ 
++    /**
++     * Optional second endpoint. A transient failure of the primary (connection, timeout, 404,
++     * 502/503/504) is retried once here. Empty when the user has only one API profile and no
++     * known alternate endpoint.
++     */
++    final String fallbackBaseUrl, fallbackApiKey, fallbackModel;
++
++    /** True when the active Android network is Wi-Fi (or unknown). Decides which side goes first. */
++    final boolean onWifi;
++
+     TranslationSettings(
+             boolean enabled,
+             String endpoint,
+@@ -12,6 +22,20 @@ final class TranslationSettings {
+             String prompt,
+             String key,
+             String provenance) {
++        this(enabled, endpoint, model, prompt, key, provenance, "", "", "", true);
++    }
++
++    TranslationSettings(
++            boolean enabled,
++            String endpoint,
++            String model,
++            String prompt,
++            String key,
++            String provenance,
++            String fallbackEndpoint,
++            String fallbackKey,
++            String fallbackProviderModel,
++            boolean wifi) {
+         this.enabled = enabled;
+         baseUrl = endpoint;
+         this.model = model;
+@@ -24,12 +48,22 @@ final class TranslationSettings {
+                               + " language; preserve names, numbers, tone and necessary"
+                               + " punctuation; do not add explanations."
+                         : prompt;
++        fallbackBaseUrl = fallbackEndpoint == null ? "" : fallbackEndpoint;
++        fallbackApiKey = fallbackKey == null ? apiKey : fallbackKey;
++        fallbackModel = fallbackProviderModel == null || fallbackProviderModel.trim().isEmpty()
++                ? model
++                : fallbackProviderModel;
++        onWifi = wifi;
+     }
+ 
+     boolean ready() {
+         return enabled && !apiKey.isEmpty() && model != null && !model.trim().isEmpty();
+     }
+ 
++    boolean hasFallback() {
++        return fallbackBaseUrl != null && !fallbackBaseUrl.trim().isEmpty();
++    }
++
+     String fingerprint() {
+         return baseUrl + '\n' + model + '\n' + prompt;
+     }
+diff --git a/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekConfig.java b/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekConfig.java
+index 638dad3..c663c23 100644
+--- a/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekConfig.java
++++ b/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/DeepSeekConfig.java
+@@ -2,6 +2,13 @@ package app.yydarlinker.deepseekcaptions;
+ 
+ import android.content.Context;
+ import android.content.SharedPreferences;
++import android.net.ConnectivityManager;
++import android.net.Network;
++import android.net.NetworkCapabilities;
++
++import java.net.URI;
++import java.util.LinkedHashMap;
++import java.util.Locale;
+ 
+ /**
+  * The saved settings of the translator. What belongs to a profile (endpoint, model, prompt) is read
+@@ -12,6 +19,8 @@ final class DeepSeekConfig {
+     private static final String ENABLED = "enabled";
+     private static final String DISPLAY_TEXT_DEBUG = "display_text_debug";
+     private static final String BASE_URL = "base_url";
++    /** Optional explicit alternate endpoint; empty means discover one from the other profiles. */
++    private static final String FALLBACK_BASE_URL = "fallback_base_url";
+     private static final String MODEL = "model";
+     private static final String PROMPT = "prompt";
+     private static final String CAPTION_SIZE_TIER = "caption_size_tier";
+@@ -149,6 +158,220 @@ final class DeepSeekConfig {
+                 || prompt.equals(DEFAULT_PROMPT);
+     }
+ 
++    /**
++     * The active network is Wi-Fi (or Ethernet). Used only to decide which endpoint is tried
++     * first: the private/LAN side on a home network, the public side on cellular. A VPN does not
++     * hide a connected Wi-Fi network from {@link ConnectivityManager#getAllNetworks()}.
++     */
++    static boolean onWifi(Context context) {
++        try {
++            ConnectivityManager manager =
++                    (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
++            if (manager == null) return true;
++            for (Network network : manager.getAllNetworks()) {
++                NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
++                if (capabilities != null
++                        && (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
++                                || capabilities.hasTransport(
++                                        NetworkCapabilities.TRANSPORT_ETHERNET))
++                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
++                    return true;
++            }
++            return false;
++        } catch (RuntimeException unavailable) {
++            return true;
++        }
++    }
++
++    /**
++     * The alternate provider: another saved API profile with a different origin, or, when only one
++     * profile exists, the known LAN/public pair of this deployment. The caller keeps the active
++     * profile unchanged; only the request endpoint is redirected.
++     */
++    static RequestSettings fallbackRequest(Context context) {
++        synchronized (ApiProfiles.LOCK) {
++            try {
++                String activeId = ApiProfiles.active(context);
++                String activeBase = baseUrl(context);
++                String explicit = fallbackBaseUrl(context);
++                if (!explicit.isEmpty() && !sameOrigin(explicit, activeBase))
++                    return fallbackSettings(context, explicit, model(context));
++                boolean activePrivate = privateHost(activeBase);
++                LinkedHashMap<String, String> profiles = ApiProfiles.list(context);
++                String bestId = null;
++                int bestScore = -1;
++                for (String id : profiles.keySet()) {
++                    if (id.equals(activeId)) continue;
++                    String candidate;
++                    try {
++                        candidate =
++                                ConfigRead.string(
++                                        ApiProfiles.values(context, id), BASE_URL, DEFAULT_BASE_URL);
++                    } catch (ConfigRead.Failure unreadable) {
++                        continue;
++                    }
++                    if (candidate.trim().isEmpty() || sameOrigin(candidate, activeBase)) continue;
++                    boolean candidatePrivate = privateHost(candidate);
++                    int score = candidatePrivate != activePrivate ? 10 : 0;
++                    String name = profiles.get(id).toLowerCase(Locale.ROOT);
++                    if (activePrivate && (name.contains("remote") || name.contains("public")
++                            || name.contains("公网") || name.contains("外网")
++                            || name.contains("反代"))) score += 5;
++                    if (!activePrivate && (name.contains("lan") || name.contains("local")
++                            || name.contains("内网") || name.contains("局域"))) score += 5;
++                    if (score > bestScore) {
++                        bestScore = score;
++                        bestId = id;
++                    }
++                }
++                if (bestId != null) {
++                    String candidate =
++                            ConfigRead.string(
++                                    ApiProfiles.values(context, bestId),
++                                    BASE_URL,
++                                    DEFAULT_BASE_URL);
++                    String endpoint = ProviderEndpoint.validate(candidate);
++                    String candidateModel =
++                            ConfigRead.string(
++                                    ApiProfiles.values(context, bestId), MODEL, DEFAULT_MODEL);
++                    String key = SecureApiKey.load(context, bestId);
++                    if (key.isEmpty()) key = SecureApiKey.load(context);
++                    return fallbackSettings(context, endpoint, candidateModel, key);
++                }
++                String alternate = alternate(activeBase);
++                if (!alternate.isEmpty())
++                    return fallbackSettings(context, alternate, model(context));
++            } catch (ConfigRead.Failure | IllegalArgumentException unavailable) {
++                // A broken second profile must never break the active one.
++            }
++            return null;
++        }
++    }
++
++    private static RequestSettings fallbackSettings(Context context, String endpoint, String model) {
++        return fallbackSettings(context, endpoint, model, SecureApiKey.load(context));
++    }
++
++    private static RequestSettings fallbackSettings(
++            Context context, String endpoint, String model, String key) {
++        String prompt = defaultPrompt(context);
++        return new RequestSettings(
++                new ProviderSettings(
++                        true,
++                        ProviderEndpoint.validate(endpoint),
++                        model == null || model.trim().isEmpty() ? DEFAULT_MODEL : model,
++                        prompt,
++                        CaptionCredentialRef.of(key),
++                        "program_default"),
++                key);
++    }
++
++    /** An explicit alternate endpoint, or empty when none is configured. */
++    static String fallbackBaseUrl(Context context) {
++        try {
++            String value = ConfigRead.string(profile(context), FALLBACK_BASE_URL, "").trim();
++            if (value.isEmpty()) return "";
++            return ProviderEndpoint.validate(value);
++        } catch (ConfigRead.Failure | IllegalArgumentException unusable) {
++            return "";
++        }
++    }
++
++    /**
++     * The endpoint the next request should prefer now: the private side on a Wi-Fi network and the
++     * public side on cellular. Used by the prewarm ping, which does not have a TranslationSettings.
++     */
++    static String preferredBaseUrl(Context context) {
++        String primary = baseUrl(context);
++        RequestSettings fallback = fallbackRequest(context);
++        if (fallback == null || fallback.provider.baseUrl.equals(primary)) return primary;
++        boolean primaryPrivate = privateHost(primary);
++        boolean fallbackPrivate = privateHost(fallback.provider.baseUrl);
++        if (primaryPrivate == fallbackPrivate) return primary;
++        boolean primaryFirst = onWifi(context) ? primaryPrivate : !primaryPrivate;
++        return primaryFirst ? primary : fallback.provider.baseUrl;
++    }
++
++    static void saveFallbackBaseUrl(Context context, String value) {
++        String clean = value == null ? "" : value.trim();
++        synchronized (ApiProfiles.LOCK) {
++            SharedPreferences.Editor edit = profile(context).edit();
++            if (clean.isEmpty()) edit.remove(FALLBACK_BASE_URL);
++            else edit.putString(FALLBACK_BASE_URL, ProviderEndpoint.validate(clean));
++            edit.apply();
++        }
++    }
++
++    private static boolean sameOrigin(String a, String b) {
++        try {
++            URI ua = URI.create(a), ub = URI.create(b);
++            return ua.getScheme().equalsIgnoreCase(ub.getScheme())
++                    && String.valueOf(ua.getRawAuthority())
++                            .equalsIgnoreCase(String.valueOf(ub.getRawAuthority()));
++        } catch (RuntimeException malformed) {
++            return false;
++        }
++    }
++
++    /** A literal private address, not a DNS name that happens to be on the LAN. */
++    static boolean privateHost(String base) {
++        try {
++            String host = URI.create(base).getHost();
++            if (host == null) return false;
++            if (host.startsWith("10.") || host.startsWith("192.168.")) return true;
++            if (host.startsWith("172.")) {
++                String[] parts = host.split("\\.");
++                if (parts.length > 1) {
++                    int second = Integer.parseInt(parts[1]);
++                    return second >= 16 && second <= 31;
++                }
++            }
++            return "localhost".equals(host) || "127.0.0.1".equals(host);
++        } catch (RuntimeException malformed) {
++            return false;
++        }
++    }
++
++    /**
++     * The other side of the LAN/public pair used by this deployment. It is only a fallback when no
++     * second API profile exists; a real second profile always wins.
++     */
++    private static boolean isLanHost(String host, String[] lanHosts) {
++        for (String lanHost : lanHosts) if (lanHost.equals(host)) return true;
++        return false;
++    }
++
++    private static String alternate(String base) {
++        try {
++            URI u = URI.create(base);
++            String host = u.getHost();
++            if (host == null) return "";
++            final String publicHost = "airoute.codet.net";
++            // 172.20.16.249 is the current co-located gateway; 192.168.2.97 remains accepted
++            // during the migration window, but the public side always points at the new host.
++            final String[] lanHosts = {"172.20.16.249", "192.168.2.97"};
++            String target;
++            String scheme;
++            int port;
++            if (isLanHost(host, lanHosts) && u.getPort() == 8787) {
++                target = publicHost;
++                scheme = "https";
++                port = -1;
++            } else if (publicHost.equals(host)) {
++                target = lanHosts[0];
++                scheme = "http";
++                port = 8787;
++            } else {
++                return "";
++            }
++            String path = u.getRawPath() == null ? "" : u.getRawPath();
++            String query = u.getRawQuery() == null ? "" : "?" + u.getRawQuery();
++            return scheme + "://" + target + (port < 0 ? "" : ":" + port) + path + query;
++        } catch (RuntimeException malformed) {
++            return "";
++        }
++    }
++
+     static void saveBaseUrl(Context context, String value) {
+         String clean = value == null ? "" : value.trim();
+         if (!clean.startsWith("https://") && !clean.startsWith("http://"))
+diff --git a/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/SecureApiKey.java b/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/SecureApiKey.java
+index 43bdacb..54d4334 100644
+--- a/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/SecureApiKey.java
++++ b/infrastructure/src/main/java/app/yydarlinker/deepseekcaptions/SecureApiKey.java
+@@ -97,6 +97,35 @@ final class SecureApiKey {
+         }
+     }
+ 
++    /**
++     * The key of one profile, bound to that profile's own endpoint origin. The automatic endpoint
++     * fallback reads the other profile's key here; switching the active profile is not required.
++     */
++    static String load(Context context, String profile) {
++        synchronized (ApiProfiles.LOCK) {
++            try {
++                String valueKey = valueKey(profile);
++                String encoded = ConfigRead.string(prefs(context), valueKey, "");
++                if (encoded.isEmpty()) return "";
++                String saved = ConfigRead.string(prefs(context), valueKey + ORIGIN, "");
++                String base =
++                        ConfigRead.string(ApiProfiles.values(context, profile), "base_url", "");
++                String current = originOf(base);
++                if (!saved.isEmpty() && !saved.equals(current)) return "";
++                return decryptStored(encoded);
++            } catch (ConfigRead.Failure unreadable) {
++                return "";
++            }
++        }
++    }
++
++    private static String originOf(String base) {
++        URI uri = URI.create(base);
++        return uri.getScheme().toLowerCase(Locale.ROOT)
++                + "://"
++                + uri.getRawAuthority().toLowerCase(Locale.ROOT);
++    }
++
+     /** Distinguishes malformed metadata from a missing/unavailable credential, without decrypting twice. */
+     static String loadChecked(Context context) {
+         String key = valueKey(context);
+diff --git a/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildApi.java b/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildApi.java
+index 3659762..8822bc7 100644
+--- a/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildApi.java
++++ b/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildApi.java
+@@ -16,6 +16,7 @@ import java.net.URL;
+ import java.net.UnknownHostException;
+ import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -251,7 +252,7 @@ final class RebuildApi {
+                                     RebuildStream.provisional(control, s, b, context))
+                             : null;
+             try {
+-                Response response = send(cfg, body, control, deadline, reader);
++                Response response = sendWithFailover(cfg, request, body, control, deadline, reader);
+                 trace(
+                         control,
+                         "REBUILD_POLICY_REQUEST",
+@@ -308,9 +309,10 @@ final class RebuildApi {
+                 if (response.status < 200 || response.status >= 300)
+                     throw new Failure(
+                             "http_" + response.status,
+-                            response.status == 401
+-                                    || response.status == 403
+-                                    || response.status == 404,
++                            // A 404 is often a reverse proxy/tunnel reconnect, not a configuration
++                            // error. Blocking the whole profile on it was the reason a transient
++                            // 404 kept failing until the app process restarted.
++                            response.status == 401 || response.status == 403,
+                             response.retryAfter);
+                 JSONObject root =
+                         reader != null && reader.streamed()
+@@ -410,17 +412,206 @@ final class RebuildApi {
+         }
+     }
+ 
+-    private static Response send(
++    /** One complete provider target: the primary profile or its automatic alternate. */
++    private static final class Target {
++        final String baseUrl, apiKey, model;
++
++        Target(String base, String key, String providerModel) {
++            baseUrl = base;
++            apiKey = key == null ? "" : key;
++            model = providerModel == null ? "" : providerModel;
++        }
++    }
++
++    /**
++     * How long a failed endpoint is skipped. The primary is tried again after this window, which is
++     * also the periodic re-discovery of a LAN endpoint after leaving and returning to Wi-Fi.
++     */
++    private static final long ENDPOINT_COOLDOWN_MS = 60_000;
++
++    private static final Map<String, Long> endpointDownUntil = new ConcurrentHashMap<>();
++
++    private static List<Target> targets(TranslationSettings cfg) {
++        Target primary = new Target(cfg.baseUrl, cfg.apiKey, cfg.model);
++        if (!cfg.hasFallback())
++            return Collections.singletonList(primary);
++        Target fallback =
++                new Target(cfg.fallbackBaseUrl, cfg.fallbackApiKey, cfg.fallbackModel);
++        if (sameOrigin(primary.baseUrl, fallback.baseUrl))
++            return Collections.singletonList(primary);
++
++        boolean primaryPrivate = privateHost(primary.baseUrl);
++        boolean fallbackPrivate = privateHost(fallback.baseUrl);
++        boolean primaryFirst;
++        if (primaryPrivate != fallbackPrivate) {
++            // On Wi-Fi the private endpoint is the natural first choice; on cellular the public one
++            // is. This is only the first choice: the other endpoint is still retried on failure.
++            primaryFirst = cfg.onWifi ? primaryPrivate : !primaryPrivate;
++        } else {
++            primaryFirst = true;
++        }
++        boolean primaryDown = isDown(primary.baseUrl);
++        boolean fallbackDown = isDown(fallback.baseUrl);
++        if (primaryFirst && primaryDown && !fallbackDown) primaryFirst = false;
++        else if (!primaryFirst && fallbackDown && !primaryDown) primaryFirst = true;
++        return primaryFirst
++                ? Arrays.asList(primary, fallback)
++                : Arrays.asList(fallback, primary);
++    }
++
++    private static boolean isDown(String base) {
++        Long until = endpointDownUntil.get(base);
++        return until != null && until > System.currentTimeMillis();
++    }
++
++    private static void markGood(String base) {
++        endpointDownUntil.remove(base);
++    }
++
++    private static void markDown(String base) {
++        if (endpointDownUntil.size() > 32) endpointDownUntil.clear();
++        endpointDownUntil.put(base, System.currentTimeMillis() + ENDPOINT_COOLDOWN_MS);
++    }
++
++    private static boolean retryableStatus(int status) {
++        return status == 404 || status == 408 || status == 502 || status == 503 || status == 504;
++    }
++
++    private static boolean sameOrigin(String a, String b) {
++        try {
++            java.net.URI ua = java.net.URI.create(a), ub = java.net.URI.create(b);
++            return String.valueOf(ua.getScheme()).equalsIgnoreCase(String.valueOf(ub.getScheme()))
++                    && String.valueOf(ua.getRawAuthority())
++                            .equalsIgnoreCase(String.valueOf(ub.getRawAuthority()));
++        } catch (RuntimeException malformed) {
++            return false;
++        }
++    }
++
++    private static boolean privateHost(String base) {
++        try {
++            String host = java.net.URI.create(base).getHost();
++            if (host == null) return false;
++            if (host.startsWith("10.") || host.startsWith("192.168.")) return true;
++            if (host.startsWith("172.")) {
++                String[] parts = host.split("\\.");
++                if (parts.length > 1) {
++                    int second = Integer.parseInt(parts[1]);
++                    return second >= 16 && second <= 31;
++                }
++            }
++            return "localhost".equals(host) || "127.0.0.1".equals(host);
++        } catch (RuntimeException malformed) {
++            return false;
++        }
++    }
++
++    /**
++     * Tries the ordered endpoints. A transient response or a connect/read failure that has not
++     * produced any streamed content moves to the next target once. A 404 is deliberately retryable
++     * here: a public reverse proxy can return one during a reconnect even though the provider is
++     * healthy.
++     */
++    private static Response sendWithFailover(
+             TranslationSettings cfg,
++            JSONObject request,
+             String body,
+             DeepSeekApiClient.RequestControl control,
+             long deadline,
+             RebuildStream.Reader reader)
+             throws Exception {
++        List<Target> candidates = targets(cfg);
++        Exception lastError = null;
++        Response lastResponse = null;
++        String pendingDown = null;
++        for (int i = 0; i < candidates.size(); i++) {
++            Target target = candidates.get(i);
++            boolean first = i == 0;
++            try {
++                if (!target.model.equals(cfg.model)) request.put("model", target.model);
++                String targetBody = request.toString();
++                Response response =
++                        send(
++                                cfg,
++                                target,
++                                targetBody,
++                                control,
++                                deadline,
++                                reader,
++                                candidates.size() > 1 && privateHost(target.baseUrl)
++                                        ? 1500
++                                        : 4000);
++                if (first
++                        && candidates.size() > 1
++                        && retryableStatus(response.status)
++                        && (reader == null || !reader.hasData())) {
++                    // Do not cool the primary down until the alternate has succeeded. If the
++                    // alternate is the unreachable LAN side on cellular, keeping the primary first
++                    // avoids adding a connect timeout to every following request.
++                    pendingDown = target.baseUrl;
++                    lastResponse = response;
++                    continue;
++                }
++                if (response.status >= 200 && response.status < 300) {
++                    markGood(target.baseUrl);
++                    if (pendingDown != null) markDown(pendingDown);
++                } else if (retryableStatus(response.status)) {
++                    markDown(target.baseUrl);
++                    if (pendingDown != null) markDown(pendingDown);
++                }
++                return response;
++            } catch (TransportFailure failure) {
++                if (failure.cancelled || !first || candidates.size() == 1) {
++                    if (lastResponse != null && !failure.cancelled) {
++                        markGood(pendingDown);
++                        return lastResponse;
++                    }
++                    throw failure;
++                }
++                if (reader != null && reader.hasData()) throw failure;
++                markDown(target.baseUrl);
++                pendingDown = target.baseUrl;
++                lastError = failure;
++            } catch (InterruptedException cancelled) {
++                throw cancelled;
++            } catch (Exception failure) {
++                if (!first || candidates.size() == 1) {
++                    if (lastResponse != null) {
++                        markGood(pendingDown);
++                        return lastResponse;
++                    }
++                    throw failure;
++                }
++                try {
++                    TranslationSourceAccess.checkActive(control);
++                } catch (InterruptedException cancelled) {
++                    throw cancelled;
++                }
++                markDown(target.baseUrl);
++                pendingDown = target.baseUrl;
++                lastError = failure;
++            }
++        }
++        if (lastResponse != null) {
++            if (pendingDown != null) markDown(pendingDown);
++            return lastResponse;
++        }
++        throw lastError == null ? new IOException("no_provider_endpoint") : lastError;
++    }
++
++    private static Response send(
++            TranslationSettings cfg,
++            Target target,
++            String body,
++            DeepSeekApiClient.RequestControl control,
++            long deadline,
++            RebuildStream.Reader reader,
++            int connectTimeoutMs)
++            throws Exception {
+         long started = System.nanoTime();
+         String phase = "connect";
+         HttpURLConnection c =
+-                (HttpURLConnection) new URL(ProviderEndpoint.chat(cfg.baseUrl)).openConnection();
++                (HttpURLConnection) new URL(ProviderEndpoint.chat(target.baseUrl)).openConnection();
+         // Declared outside the resource clause so the catch block can read the deadline's own timer
+         // fact.
+         NetworkDeadline guard = new NetworkDeadline(c, deadline);
+@@ -431,9 +622,12 @@ final class RebuildApi {
+             c.setDoOutput(true);
+             c.setUseCaches(false);
+             c.setInstanceFollowRedirects(false);
+-            c.setConnectTimeout(Math.min(4000, TranslationSourceAccess.remaining(deadline)));
++            c.setConnectTimeout(
++                    Math.min(
++                            Math.max(800, connectTimeoutMs),
++                            TranslationSourceAccess.remaining(deadline)));
+             c.setReadTimeout(TranslationSourceAccess.remaining(deadline));
+-            ProviderEndpoint.authenticate(c, cfg.baseUrl, cfg.apiKey);
++            ProviderEndpoint.authenticate(c, target.baseUrl, target.apiKey);
+             c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+             c.setRequestProperty("Accept", "application/json");
+             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+diff --git a/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildStream.java b/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildStream.java
+index fd83d1f..fea71a4 100644
+--- a/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildStream.java
++++ b/translation-core/src/main/java/app/yydarlinker/deepseekcaptions/RebuildStream.java
+@@ -186,6 +186,11 @@ final class RebuildStream {
+             return streamed;
+         }
+ 
++        /** True once any streamed content or SSE event has been consumed. */
++        boolean hasData() {
++            return streamed || content.length() > 0;
++        }
++
+         /** The provider's code when the stream was cut by an error event, else empty. */
+         String error() {
+             if (line.size() > 0) {
+--- /dev/null	2026-11-01 22:23:47.000000000 +0800
++++ application-host/src/main/java/app/yydarlinker/deepseekcaptions/WarmPing.java	2026-11-01 14:15:41.382010600 +0800
+@@ -0,0 +1,52 @@
++package app.yydarlinker.deepseekcaptions;
++
++import android.content.Context;
++
++import java.net.HttpURLConnection;
++import java.net.URL;
++
++/**
++ * Best-effort prewarm of the current video's whole-track cache. It follows the same LAN/public
++ * endpoint preference as the translation requests, so it does not warm the wrong host after a
++ * network switch. Every failure is silent: prewarming must never disturb playback.
++ */
++final class WarmPing {
++    private WarmPing() {}
++
++    static void ping(Context context, String videoId) {
++        try {
++            if (context == null || videoId == null || videoId.isEmpty()) return;
++            String base = DeepSeekConfig.preferredBaseUrl(context);
++            if (base == null || base.isEmpty()) return;
++            String url =
++                    base.replace("/v1/plain/chat/completions", "/yt/warm")
++                            .replace("/v1/chat/completions", "/yt/warm");
++            if (!url.contains("/yt/warm")) return;
++            if (url.indexOf('?') < 0) url += "?v=" + videoId;
++            else url += "&v=" + videoId;
++            final String target = url;
++            Thread thread =
++                    new Thread(
++                            () -> {
++                                HttpURLConnection connection = null;
++                                try {
++                                    connection = (HttpURLConnection) new URL(target).openConnection();
++                                    connection.setConnectTimeout(3000);
++                                    connection.setReadTimeout(5000);
++                                    connection.setUseCaches(false);
++                                    connection.setRequestMethod("GET");
++                                    connection.getResponseCode();
++                                } catch (Exception ignored) {
++                                    // Prewarming is optional.
++                                } finally {
++                                    if (connection != null) connection.disconnect();
++                                }
++                            },
++                            "CaptionWarmPing");
++            thread.setDaemon(true);
++            thread.start();
++        } catch (Throwable ignored) {
++            // A broken extension must never stop YouTube from starting.
++        }
++    }
++}

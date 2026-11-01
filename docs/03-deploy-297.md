@@ -1,3 +1,6 @@
+> 2026-11-01 注：网关已迁移到 `172.20.16.249:/opt/immersive-translator-gateway`，
+> 本文保留为 2.97 旧机部署与回滚记录。迁移步骤见 `docs/12-migrate-gateway-to-249.md`。
+
 # 部署到 2.97（LXD Ubuntu 22.04）
 
 ## 现状
