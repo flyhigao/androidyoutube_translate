@@ -110,14 +110,15 @@ __Secure-ROLLOUT_TOKEN
 若要回滚到整轨方案，再启用：
 
 ```bash
-# 2.97
-YT_PROXY=socks5h://127.0.0.1:11070          # 经 SSH 隧道走路由器 PassWall（仅本机监听，故用隧道）
+# 249（B 路线回滚时）
+# YT_PROXY 需要按新主机重新配置；当前 shim/A 路线不用
 # 服务端 cookie 文件（Netscape 格式，4 个匿名 cookie 即可）
 /opt/immersive-translator-gateway/data/yt-cookies.txt
 ```
 
-服务端 cookie 的自动刷新没有做成 timer，因为整轨模式下 yt-dlp 每次请求都会现取；
-只有在长期不给 `--cookies` 时才会踩 429/bot check。
+服务端**没有** 401/403 触发的自动刷新，也没有定时刷新 timer。
+B 路线每次 yt-dlp 运行会读取 `data/yt-cookies.txt`（`--cookies` 可能在结束时回写 cookie jar），
+但这不是专门的刷新机制，也不保证一定更新；A 路线（shim）完全不用服务端 Cookie。
 
 ---
 
